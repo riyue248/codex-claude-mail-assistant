@@ -544,6 +544,92 @@ def duration_from_session_file(path: Path, turn_id: str) -> int | None:
     return None
 
 
+CODEX_TOKEN_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+
+
+def normalized_token_usage(value: Any, fields: tuple[str, ...]) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for field in fields:
+        amount = value.get(field)
+        if isinstance(amount, (int, float)) and amount >= 0:
+            result[field] = int(amount)
+    return result
+
+
+def subtract_token_usage(current: dict[str, int], baseline: dict[str, int]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for field in CODEX_TOKEN_FIELDS:
+        if field not in current:
+            continue
+        amount = current[field] - baseline.get(field, 0)
+        if amount >= 0:
+            result[field] = amount
+    return result if "total_tokens" in result else {}
+
+
+def token_usage_from_session_file(path: Path, turn_id: str) -> dict[str, int] | None:
+    """Return one Codex turn's usage from cumulative session counters."""
+    previous_total: dict[str, int] = {}
+    baseline: dict[str, int] = {}
+    current_total: dict[str, int] = {}
+    in_target_turn = False
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = row.get("payload", {})
+                row_type = row.get("type")
+                payload_type = payload.get("type")
+                row_turn_id = str(payload.get("turn_id", ""))
+
+                if row_type == "event_msg" and payload_type == "token_count":
+                    usage = normalized_token_usage(
+                        (payload.get("info") or {}).get("total_token_usage"),
+                        CODEX_TOKEN_FIELDS,
+                    )
+                    if usage:
+                        if in_target_turn:
+                            current_total = usage
+                        else:
+                            previous_total = usage
+                    continue
+
+                starts_target = (
+                    row_turn_id == turn_id
+                    and (
+                        (row_type == "event_msg" and payload_type == "task_started")
+                        or row_type == "turn_context"
+                    )
+                )
+                if starts_target and not in_target_turn:
+                    baseline = dict(previous_total)
+                    in_target_turn = True
+                    continue
+
+                if (
+                    in_target_turn
+                    and row_type == "event_msg"
+                    and payload_type == "task_complete"
+                    and row_turn_id == turn_id
+                ):
+                    usage = subtract_token_usage(current_total, baseline)
+                    return usage or None
+    except OSError:
+        logging.exception("could not read Codex token usage path=%s", path)
+    return None
+
+
 def session_file_candidates(thread_id: str) -> list[Path]:
     codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
     candidates: list[Path] = []
@@ -788,6 +874,21 @@ def resolve_duration_ms(event: dict[str, Any]) -> int | None:
     return None
 
 
+def resolve_token_usage(event: dict[str, Any]) -> dict[str, int] | None:
+    existing = event.get("_token_usage")
+    if isinstance(existing, dict):
+        return existing
+    thread_id = str(event.get("thread-id", "")).strip()
+    turn_id = str(event.get("turn-id", "")).strip()
+    if not thread_id or not turn_id:
+        return None
+    for path in session_file_candidates(thread_id):
+        usage = token_usage_from_session_file(path, turn_id)
+        if usage:
+            return usage
+    return None
+
+
 def should_send_notification(
     event: dict[str, Any],
     threshold_ms: int = AUTO_SEND_THRESHOLD_MS,
@@ -949,6 +1050,29 @@ def format_duration(duration_ms: Any) -> str:
     return f"{seconds} 秒"
 
 
+def format_token_usage(usage: Any) -> str:
+    if not isinstance(usage, dict):
+        return "不可用"
+    total = usage.get("total_tokens")
+    if not isinstance(total, (int, float)) or total < 0:
+        return "不可用"
+    details: list[str] = []
+    labels = (
+        ("input_tokens", "输入"),
+        ("output_tokens", "输出"),
+        ("cached_input_tokens", "缓存输入"),
+        ("cache_read_input_tokens", "缓存读取"),
+        ("cache_creation_input_tokens", "缓存写入"),
+        ("reasoning_output_tokens", "推理输出"),
+    )
+    for field, label in labels:
+        amount = usage.get(field)
+        if isinstance(amount, (int, float)) and amount >= 0:
+            details.append(f"{label} {int(amount):,}")
+    suffix = f"（{' / '.join(details)}）" if details else ""
+    return f"共 {int(total):,}{suffix}"
+
+
 def claude_content_text(content: Any) -> str:
     if isinstance(content, str):
         return safe_unicode_text(content).strip()
@@ -978,26 +1102,36 @@ def is_claude_terminal_echo(text: str) -> bool:
     )
 
 
-def claude_transcript_context(transcript_value: Any) -> tuple[str, str | None, str, str]:
-    """Return the real prompt, start timestamp, assistant text, and working directory."""
+def claude_transcript_context(
+    transcript_value: Any,
+) -> tuple[str, str | None, str, str, dict[str, int] | None]:
+    """Return prompt, start time, result, cwd, and usage for the latest Claude turn."""
     if not transcript_value:
-        return "", None, "", ""
+        return "", None, "", "", None
     try:
         transcript = Path(str(transcript_value)).expanduser().resolve(strict=False)
     except (OSError, ValueError):
-        return "", None, "", ""
+        return "", None, "", "", None
     if transcript.suffix.lower() != ".jsonl" or not transcript.is_file():
-        return "", None, "", ""
+        return "", None, "", "", None
     try:
         if transcript.stat().st_size > 100 * 1024 * 1024:
-            return "", None, "", ""
+            return "", None, "", "", None
     except OSError:
-        return "", None, "", ""
+        return "", None, "", "", None
 
     latest_text = ""
     latest_timestamp: str | None = None
     latest_assistant = ""
     latest_cwd = ""
+    usage_totals = {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+    }
+    seen_message_ids: set[str] = set()
+    has_usage = False
     try:
         with transcript.open("r", encoding="utf-8", errors="replace") as stream:
             for line in stream:
@@ -1023,16 +1157,36 @@ def claude_transcript_context(transcript_value: Any) -> tuple[str, str | None, s
                 ):
                     latest_text = text
                     latest_timestamp = str(row.get("timestamp") or "") or None
+                    latest_assistant = ""
+                    usage_totals = {field: 0 for field in usage_totals}
+                    seen_message_ids.clear()
+                    has_usage = False
                 elif row_type == "assistant" and message.get("role") == "assistant" and text:
                     latest_assistant = text
+                if row_type == "assistant" and message.get("role") == "assistant" and latest_timestamp:
+                    usage = message.get("usage")
+                    message_id = str(message.get("id", "")).strip()
+                    dedupe_key = message_id or str(row.get("uuid", "")).strip()
+                    if isinstance(usage, dict) and (not dedupe_key or dedupe_key not in seen_message_ids):
+                        if dedupe_key:
+                            seen_message_ids.add(dedupe_key)
+                        for field in usage_totals:
+                            amount = usage.get(field)
+                            if isinstance(amount, (int, float)) and amount >= 0:
+                                usage_totals[field] += int(amount)
+                                has_usage = True
     except OSError:
-        return "", None, "", ""
-    return latest_text, latest_timestamp, latest_assistant, latest_cwd
+        return "", None, "", "", None
+    token_usage = None
+    if has_usage:
+        token_usage = dict(usage_totals)
+        token_usage["total_tokens"] = sum(usage_totals.values())
+    return latest_text, latest_timestamp, latest_assistant, latest_cwd, token_usage
 
 
 def claude_transcript_turn(transcript_value: Any) -> tuple[str, str | None]:
     """Return the latest real user prompt and its timestamp from a Claude transcript."""
-    user_request, started_at, _assistant, _cwd = claude_transcript_context(transcript_value)
+    user_request, started_at, _assistant, _cwd, _usage = claude_transcript_context(transcript_value)
     return user_request, started_at
 
 
@@ -1099,7 +1253,7 @@ def duration_since_timestamp(timestamp: str | None) -> int | None:
 
 
 def claude_event_from_hook(hook: dict[str, Any]) -> dict[str, Any]:
-    user_request, started_at, transcript_result, transcript_cwd = claude_transcript_context(
+    user_request, started_at, transcript_result, transcript_cwd, token_usage = claude_transcript_context(
         hook.get("transcript_path")
     )
     result = (
@@ -1118,6 +1272,7 @@ def claude_event_from_hook(hook: dict[str, Any]) -> dict[str, Any]:
         "input-messages": [user_request] if user_request else [],
         "last-assistant-message": result,
         "_duration_ms": duration_since_timestamp(started_at),
+        "_token_usage": token_usage,
         "_platform": "claude",
     }
 
@@ -1162,6 +1317,7 @@ def build_message(config: dict[str, Any], event: dict[str, Any]) -> EmailMessage
     subject = safe_unicode_text(f"[{brand}任务完成][{task_type}] 这是一封 {brand} 任务完成通知邮件。")
     user_request, result, _subject_hint = event_text(event)
     duration = format_duration(event.get("_duration_ms"))
+    token_usage = format_token_usage(event.get("_token_usage"))
     reason = concise_email_text(str(event.get("_send_reason", f"{brand} 任务完成")), 120)
     completed_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
     cwd = safe_unicode_text(str(event.get("cwd", ""))).strip() or "未知"
@@ -1185,6 +1341,7 @@ def build_message(config: dict[str, Any], event: dict[str, Any]) -> EmailMessage
 详细信息
 任务状态：已完成
 回答耗时：{duration}
+本次任务 Token 用量：{token_usage}
 发送原因：{reason}
 完成时间：{completed_at}
 工作目录：{cwd}
@@ -1201,6 +1358,7 @@ def build_message(config: dict[str, Any], event: dict[str, Any]) -> EmailMessage
         "user_request": html.escape(user_request).replace("\n", "<br>"),
         "result": html.escape(result).replace("\n", "<br>"),
         "duration": html.escape(duration),
+        "token_usage": html.escape(token_usage),
         "reason": html.escape(reason),
         "completed_at": html.escape(completed_at),
         "cwd": html.escape(cwd),
@@ -1229,6 +1387,7 @@ def build_message(config: dict[str, Any], event: dict[str, Any]) -> EmailMessage
       <div style="color:#536275;line-height:1.65;word-break:break-word;">
         <div>任务状态：已完成</div>
         <div>回答耗时：{escaped['duration']}</div>
+        <div>本次任务 Token 用量：{escaped['token_usage']}</div>
         <div>发送原因：{escaped['reason']}</div>
         <div>完成时间：{escaped['completed_at']}</div>
         <div>工作目录：{escaped['cwd']}</div>
@@ -1293,6 +1452,12 @@ def sample_event(platform: str = "codex") -> dict[str, Any]:
         "cwd": str(Path.cwd()),
         "input-messages": [f"这是一封 {brand} 邮件通知测试。"],
         "last-assistant-message": f"{brand} 邮件通知配置成功，可以在任务完成后自动发送邮件。",
+        "_token_usage": {
+            "input_tokens": 1234,
+            "output_tokens": 321,
+            "cached_input_tokens": 800,
+            "total_tokens": 1555,
+        },
         "_platform": "claude" if is_claude else "codex",
     }
 
@@ -1366,6 +1531,7 @@ def run_notify(raw_event: str) -> int:
         if already_sent(event):
             logging.info("skip duplicate event thread=%s turn=%s", event.get("thread-id"), event.get("turn-id"))
             return 0
+        event["_token_usage"] = resolve_token_usage(event)
         config, password = load_settings()
         send_email(config, password, event)
         mark_sent(event)

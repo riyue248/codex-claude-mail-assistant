@@ -153,6 +153,76 @@ class NotifierTests(unittest.TestCase):
             self.assertGreater(event["_duration_ms"], 8_000)
             self.assertLess(event["_duration_ms"], 30_000)
 
+    def test_claude_transcript_sums_latest_turn_usage_without_chunk_duplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            started = datetime.now(timezone.utc) - timedelta(seconds=12)
+            shared_usage = {
+                "input_tokens": 100,
+                "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 300,
+                "output_tokens": 40,
+            }
+            rows = [
+                {
+                    "type": "user",
+                    "timestamp": started.isoformat(),
+                    "message": {"role": "user", "content": "分析代码"},
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "chunk-thinking",
+                    "message": {
+                        "id": "message-1",
+                        "role": "assistant",
+                        "content": [{"type": "thinking", "thinking": "..."}],
+                        "usage": shared_usage,
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "chunk-text",
+                    "message": {
+                        "id": "message-1",
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "已分析"}],
+                        "usage": shared_usage,
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "second-call",
+                    "message": {
+                        "id": "message-2",
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "最终完成"}],
+                        "usage": {
+                            "input_tokens": 10,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 30,
+                            "output_tokens": 5,
+                        },
+                    },
+                },
+            ]
+            transcript.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+            event = notifier.claude_event_from_hook(
+                {"session_id": "usage-session", "transcript_path": str(transcript)}
+            )
+            self.assertEqual(
+                event["_token_usage"],
+                {
+                    "input_tokens": 110,
+                    "cache_creation_input_tokens": 20,
+                    "cache_read_input_tokens": 330,
+                    "output_tokens": 45,
+                    "total_tokens": 505,
+                },
+            )
+
     def test_claude_transcript_ignores_terminal_echo_and_uses_transcript_cwd(self):
         with tempfile.TemporaryDirectory() as directory:
             transcript = Path(directory) / "session.jsonl"
@@ -442,6 +512,75 @@ class NotifierTests(unittest.TestCase):
             ]
             path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
             self.assertEqual(notifier.duration_from_session_file(path, "wanted"), 345_678)
+
+    def test_reads_codex_turn_token_delta_from_session_jsonl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.jsonl"
+            rows = [
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 1000,
+                                "cached_input_tokens": 600,
+                                "output_tokens": 100,
+                                "reasoning_output_tokens": 20,
+                                "total_tokens": 1100,
+                            }
+                        },
+                    },
+                },
+                {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "wanted"}},
+                {"type": "turn_context", "payload": {"turn_id": "wanted"}},
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 1250,
+                                "cached_input_tokens": 780,
+                                "output_tokens": 135,
+                                "reasoning_output_tokens": 27,
+                                "total_tokens": 1385,
+                            }
+                        },
+                    },
+                },
+                {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "wanted"}},
+            ]
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            self.assertEqual(
+                notifier.token_usage_from_session_file(path, "wanted"),
+                {
+                    "input_tokens": 250,
+                    "cached_input_tokens": 180,
+                    "output_tokens": 35,
+                    "reasoning_output_tokens": 7,
+                    "total_tokens": 285,
+                },
+            )
+
+    def test_message_contains_formatted_token_usage(self):
+        config = {"sender": "from@example.com", "recipient": "to@example.com"}
+        event = {
+            "input-messages": ["完成任务"],
+            "last-assistant-message": "已经完成",
+            "_token_usage": {
+                "input_tokens": 12345,
+                "cached_input_tokens": 9000,
+                "output_tokens": 678,
+                "reasoning_output_tokens": 12,
+                "total_tokens": 13023,
+            },
+        }
+        body = notifier.build_message(config, event).get_body(preferencelist=("plain",)).get_content()
+        self.assertIn(
+            "本次任务 Token 用量：共 13,023（输入 12,345 / 输出 678 / 缓存输入 9,000 / 推理输出 12）",
+            body,
+        )
 
     def test_summarizes_codex_session_for_gui(self):
         with tempfile.TemporaryDirectory() as directory:

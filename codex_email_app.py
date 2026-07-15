@@ -22,7 +22,7 @@ import codex_email_notify as notifier
 
 
 APP_TITLE = "Codex / Claude Code 邮件助手"
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.6.0"
 PAGE_BG = "#f4f7fb"
 CARD_BG = "#ffffff"
 INK = "#172033"
@@ -465,7 +465,7 @@ class EmailAssistantApp:
         ).grid(row=2, column=1, sticky="w", pady=(0, 4))
         ttk.Label(
             rules,
-            text="邮件会标明项目/非项目归属，并简要列出你的要求、完成结果和详细信息。",
+            text="邮件会标明任务归属，并列出要求、完成结果、耗时和本次任务 Token 用量。",
             style="CardMuted.TLabel",
         ).grid(row=3, column=1, sticky="w", pady=(2, 4))
 

@@ -1,6 +1,6 @@
 #define MyAppName "Codex 与 Claude Code 邮件助手"
-#define MyAppVersion "1.5.2"
-#define MyAppExeName "CodexClaudeMailAssistant-1.5.2.exe"
+#define MyAppVersion "1.6.0"
+#define MyAppExeName "CodexClaudeMailAssistant-1.6.0.exe"
 
 [Setup]
 AppId={{B9C3E5DE-77B3-4A9F-8A35-A4D7AB3B4C61}
@@ -13,8 +13,8 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 DisableWelcomePage=no
 PrivilegesRequired=lowest
-OutputDir=..\CodexClaudeMailAssistant-v1.5.2
-OutputBaseFilename=CodexClaudeMailAssistant-Setup-1.5.2
+OutputDir=..\CodexClaudeMailAssistant-v1.6.0
+OutputBaseFilename=CodexClaudeMailAssistant-Setup-1.6.0
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -27,8 +27,8 @@ RestartApplications=no
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式："; Flags: checkedonce
 
 [Files]
-Source: "..\CodexClaudeMailAssistant-v1.5.2\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\CodexClaudeMailAssistant-v1.5.2\使用说明.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\CodexClaudeMailAssistant-v1.6.0\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\CodexClaudeMailAssistant-v1.6.0\使用说明.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [InstallDelete]
 Type: files; Name: "{app}\CodexClaudeMailAssistant-*.exe"

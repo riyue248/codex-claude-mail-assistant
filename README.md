@@ -4,7 +4,7 @@
 
 这是一个面向 Windows 的公开源码桌面工具。它把 Codex 的任务完成通知和 Claude Code 的 `Stop Hook` 接入 SMTP 邮箱；当任务达到设定时长，或符合你为对话设置的发送规则时，软件会生成一封简洁的 HTML 邮件，告诉你哪个项目、哪项任务已经完成，以及最终实现了什么。
 
-> 当前版本：v1.5.2。项目为社区工具，与 OpenAI、Anthropic、腾讯或网易没有隶属关系。
+> 当前版本：v1.6.0。项目为社区工具，与 OpenAI、Anthropic、腾讯或网易没有隶属关系。
 
 ## 它解决什么问题
 
@@ -26,7 +26,7 @@ flowchart LR
 - Claude Code 使用独立的全局发送规则，无需维护工作目录列表。
 - Codex 与 Claude Code 拥有两套互不影响的自动发送时间阈值。
 - 自动识别项目与非项目对话，并在邮件中显示项目名称和工作目录。
-- 邮件包含最后一条有效要求、完成结果、回答耗时、发送原因和任务 ID。
+- 邮件包含最后一条有效要求、完成结果、回答耗时、本次任务 Token 用量、发送原因和任务 ID。
 - 自动识别 QQ、Foxmail、163、126、Gmail、Outlook 等常用 SMTP 参数。
 - 提供邮箱授权码官方页面入口，但不会读取网页、剪贴板或自动获取授权码。
 - 授权码通过 Windows DPAPI 加密，仅当前 Windows 用户可以解密。
@@ -39,7 +39,7 @@ flowchart LR
 普通用户请前往 [Releases](../../releases/latest) 下载最新版安装程序：
 
 ```text
-CodexClaudeMailAssistant-Setup-1.5.2.exe
+CodexClaudeMailAssistant-Setup-1.6.0.exe
 ```
 
 安装程序提供两种方式：
@@ -104,7 +104,7 @@ Claude Code 可选择：
 - 任务类型与项目名称
 - 最后一条有效用户要求
 - Codex 或 Claude Code 的完成结果
-- 回答耗时、发送原因和完成时间
+- 回答耗时、本次任务 Token 用量、发送原因和完成时间
 - 工作目录、任务 ID 和回合 ID
 
 ## 隐私与安全
@@ -161,4 +161,4 @@ python -m pip install pyinstaller
 
 ## 版本说明
 
-v1.5.2：修复 Windows 中文系统代码页导致的 Claude Code 邮件乱码；邮件优先从原始会话记录读取要求、结果与工作目录，并过滤 `<bash-stdout>` 等终端回显。
+v1.6.0：每封 Codex 与 Claude Code 通知邮件新增本次任务 Token 用量；分别按两种平台的真实会话记录统计，并避免缓存或分块消息重复计数。
